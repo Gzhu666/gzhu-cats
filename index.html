@@ -758,7 +758,7 @@ const CATS = [
   /* 03 */ { name:"康康", en:"KANG KANG", imgs:["assets/c03.jpg","assets/c10.jpg"], ar:1.335, ars:[1.335,0.750],
     note:"三花，趴在瓷砖墙角的台沿上。另一张里，它坐在红砖道边的矮墙下。" },
 
-  /* 04 */ { name:"奶油", en:"NAI YOU", imgs:["assets/c04.jpg"], ar:0.750,
+  /* 04 */ { name:"无常", en:"WU CHANG", imgs:["assets/c04.jpg"], ar:0.750,
     note:"黑白配色，两条前腿是白的，正面对着镜头走过来。" },
 
   /* 05 */ { name:"眼线", en:"YAN XIAN", imgs:["assets/c05.jpg"], ar:0.750,
@@ -819,6 +819,18 @@ const GUIDE1_AT = LUCKY_AT + 1;
 const GUIDE2_AT = GUIDE1_AT + 1;
 
 const thumbOf = src => src.replace('assets/c', 'assets/thumbs/t');
+
+/* 能用 WebP 就走 WebP（同样清晰，体积小 38%），不支持的老内核退回 JPG */
+const SUPPORTS_WEBP = (() => {
+  try { return document.createElement('canvas').toDataURL('image/webp').indexOf('data:image/webp') === 0; }
+  catch (e) { return false; }
+})();
+const wp = src => SUPPORTS_WEBP ? src.replace('/c', '/w/c').replace(/\.jpg$/, '.webp') : src;
+const twp = src => {
+  const m = /c(\d+)\.jpg$/.exec(src);
+  if (!m) return thumbOf(src);
+  return SUPPORTS_WEBP ? `assets/thumbs/t${m[1]}.webp` : thumbOf(src);
+};
 
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -896,7 +908,7 @@ index.innerHTML = `
     ${CATS.map((c, i) => `
       <button class="gitem" data-go="${CAT_START + i}" type="button">
         ${c.imgs.length
-          ? `<img class="thumb" src="${thumbOf(c.imgs[0])}" alt="${esc(c.name)}" loading="lazy" onerror="this.onerror=null;this.src='${c.imgs[0]}'">`
+          ? `<img class="thumb" fetchpriority="high" decoding="async" src="${twp(c.imgs[0])}" alt="${esc(c.name)}" loading="lazy" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src='${thumbOf(c.imgs[0])}'}else{this.src='${c.imgs[0]}'}">`
           : `<div class="empty">待补</div>`}
         <span class="gn">${esc(c.name)}</span>
         <span class="gi">NO.${String(i + 1).padStart(2, '0')}</span>
@@ -918,7 +930,7 @@ CATS.forEach((c, i) => {
 
   const photoHTML = hasPhoto ? `
     <div class="photo r" style="--ar:${c.ar};--d:1">
-      <img class="photo-img" src="${c.imgs[0]}" alt="${esc(c.name)}" ${i > 1 ? 'loading="lazy"' : ''} decoding="async">
+      <img class="photo-img" src="${wp(c.imgs[0])}" alt="${esc(c.name)}" ${i > 1 ? 'loading="lazy"' : ''} decoding="async" onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src='${c.imgs[0]}'}">
       ${c.imgs[1] ? `<button class="alt" type="button" data-alt="1"><i></i>另一张</button>` : ''}
     </div>` : `
     <div class="photo photo-empty r" style="--ar:${c.ar};--d:1">
@@ -932,7 +944,7 @@ CATS.forEach((c, i) => {
 
   sec.innerHTML = `
     <div class="deco">
-      ${hasPhoto ? `<div class="slide-bg" style="background-image:url('${c.imgs[0]}')"></div>` : ''}
+      ${hasPhoto ? `<div class="slide-bg" style="background-image:url('${wp(c.imgs[0])}')"></div>` : ''}
       <div class="ghost">${no}</div>
     </div>
     <div class="cat-body">
@@ -1118,6 +1130,9 @@ function paint() {
     s.style.visibility = show ? 'visible' : 'hidden';
   });
 
+  /* 翻到猫页时，把后面三只的照片先下好 */
+  if (idx >= CAT_START && idx < MORE_AT) prefetchAhead(idx - CAT_START + 1);
+
   /* 进度条 */
   progBar.style.width = (idx / LAST * 100) + '%';
 
@@ -1208,8 +1223,8 @@ deck.addEventListener('click', e => {
   const ars = cat.ars || cat.imgs.map(() => cat.ar);
   img.style.opacity = '0';
   setTimeout(() => {
-    img.setAttribute('src', cat.imgs[nxt]);
-    if (bg) bg.style.backgroundImage = `url('${cat.imgs[nxt]}')`;
+    img.setAttribute('src', wp(cat.imgs[nxt]));
+    if (bg) bg.style.backgroundImage = `url('${wp(cat.imgs[nxt])}')`;
     slide.querySelector('.photo').style.setProperty('--ar', ars[nxt]);
     img.style.opacity = '1';
   }, 220);
@@ -1330,16 +1345,36 @@ const luckyWord = byId('luckyWord');
 const luckyName = byId('luckyName');
 const luckyNote = byId('luckyNote');
 
-let drawing = false, luckyIdx = -1, lastShown = -1;
+let drawing = false, luckyIdx = -1, lastShown = -1, lastPick = -1;
+
+/* 把大图下好并解码，回调之后才揭晓 —— 否则名字已经出来、照片还停在上一只 */
+function preloadFull(src) {
+  return new Promise(resolve => {
+    const im = new Image();
+    im.onload = () => {
+      if (im.decode) im.decode().then(resolve).catch(resolve);
+      else resolve();
+    };
+    im.onerror = resolve;
+    im.src = src;
+  });
+}
 
 function settleLucky(i) {
   const c = CATS[i];
   luckyIdx = i;
-  slotImg.src = c.imgs[0];
-  slotImg.classList.add('show');
   slot.classList.remove('spin');
-  slot.classList.add('settled');
   slotQ.style.opacity = '0';
+
+  /* 先挂同一张的缩略图：文字立刻能出，而且绝不会串成别的猫 */
+  slotImg.src = twp(c.imgs[0]);
+  slotImg.classList.add('show');
+  slot.classList.add('settled');
+
+  /* 大图到了再换成清晰版，都是同一只猫，视觉上只是变清楚 */
+  preloadFull(wp(c.imgs[0])).then(() => {
+    if (luckyIdx === i) slotImg.src = wp(c.imgs[0]);
+  });
 
   luckyWord.textContent = SITE.luckyWord;
   luckyName.textContent = c.name;
@@ -1366,14 +1401,19 @@ function drawLucky() {
   slot.classList.add('spin');
   slotQ.style.opacity = '0';
 
-  const pick = Math.floor(Math.random() * total);
+  /* 不跟上一次结果重复：连着抽到同一只，用户会以为是 bug */
+  let pick = Math.floor(Math.random() * total);
+  if (pick === lastPick && total > 1) pick = (pick + 1 + Math.floor(Math.random() * (total - 1))) % total;
+  lastPick = pick;
+
   const steps = 12;
   let n = 0;
   const flash = () => {
     let i = Math.floor(Math.random() * total);
     if (i === lastShown && total > 1) i = (i + 1) % total;
     lastShown = i;
-    slotImg.src = CATS[i].imgs[0];
+    /* 翻动用缩略图：10KB 一张，几乎是瞬间的；定下来再换大图 */
+    slotImg.src = twp(CATS[i].imgs[0]);
     slotImg.classList.add('show');
     n++;
     if (n < steps) setTimeout(flash, 50 + n * n * 0.9);   // 越翻越慢
@@ -1443,6 +1483,50 @@ warm(INDEX_AT);                          // 名录：进站第一个内容页
 warm(OUTRO_AT);                          // 赞赏码
 setTimeout(() => warm(LUCKY_AT), 600);   // 幸运抽奖
 
+/* ---------- 后台预取 ----------
+   猫页的图是 loading="lazy"，而各页横排、不在视口里，所以每翻一页才开始下载。
+   这里等首屏稳定后，按浏览顺序把后面的照片悄悄下好，翻过去就不用等。 */
+const _pf = new Set();
+function prefetch(urls) {
+  const conn = navigator.connection || {};
+  if (conn.saveData) return;                                  // 用户开了省流量模式
+  if (/^(slow-)?2g$/.test(conn.effectiveType || '')) return;   // 网太慢，别跟首屏抢带宽
+  urls.forEach(src => {
+    if (!src || _pf.has(src)) return;
+    _pf.add(src);
+    const im = new Image();
+    im.decoding = 'async';
+    if ('fetchPriority' in im) im.fetchPriority = 'low';
+    im.src = src;
+  });
+}
+
+/* 正看第 k 只时，把后面 3 只悄悄下好 —— 只下马上要用的，不浪费流量 */
+function prefetchAhead(k) {
+  const urls = [];
+  for (let j = 0; j < 3; j++) {
+    const c = CATS[k + j];
+    if (c) c.imgs.forEach(x => urls.push(wp(x)));
+  }
+  prefetch(urls);
+}
+
+/* 等名录的缩略图真的下完再开始预取，否则首屏反而被拖慢 */
+function whenIndexReady(fn) {
+  const imgs = Array.from(slides[INDEX_AT].querySelectorAll('img'));
+  let fired = false, left = 0;
+  const fire = () => { if (fired) return; fired = true; setTimeout(fn, 200); };
+  imgs.forEach(im => {
+    if (im.complete && im.naturalWidth) return;
+    left++;
+    const tick = () => { if (--left <= 0) fire(); };
+    im.addEventListener('load', tick, { once: true });
+    im.addEventListener('error', tick, { once: true });
+  });
+  if (!left) fire();
+  setTimeout(fire, 3000);                                     // 兜底：网络差就不等了
+}
+
 /* 遮罩还在时把末两页各渲染一帧，之后第一次切过去就不会卡一下 */
 function prewarm() {
   const seq = [OUTRO_AT, LUCKY_AT, GUIDE1_AT];
@@ -1468,6 +1552,8 @@ paint();
 window.addEventListener('load', () => {
   prewarm();
   setTimeout(() => byId('boot').classList.add('done'), 240);
+  /* 名录下完之后，先把前 3 只猫的照片备好（从名录点进去最多的就是这几只） */
+  whenIndexReady(() => prefetch(CATS.slice(0, 3).flatMap(c => c.imgs.map(wp))));
 });
 setTimeout(() => byId('boot').classList.add('done'), 1400);
 </script>
