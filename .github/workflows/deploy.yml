@@ -1,0 +1,37 @@
+name: Deploy to Cloudflare Pages
+
+# 每次 push 到 main 就自动部署；也可以在 Actions 页面手动点 Run workflow
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 连续 push 时只保留最后一次部署
+concurrency:
+  group: cloudflare-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 整理要发布的文件
+        # 只把站点需要的东西挑出来，避免把 .git、README 一起传上去
+        run: |
+          mkdir -p dist
+          cp index.html _headers dist/
+          cp -r assets dist/
+          echo "待发布文件数：$(find dist -type f | wc -l)"
+
+      - name: 部署到 Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=gzhu-cats --branch=main
