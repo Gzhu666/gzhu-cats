@@ -1,6 +1,9 @@
-name: Deploy to Cloudflare Pages
+# ─────────────────────────────────────────────────────────────────
+# 每次 push 到 main，就把仓库里的静态文件同步到 Cloudflare Worker
+# 这是仓库里【唯一】需要新增的文件，其它文件一律不用动
+# ─────────────────────────────────────────────────────────────────
+name: Deploy to Cloudflare Workers
 
-# 每次 push 到 main 就自动部署；也可以在 Actions 页面手动点 Run workflow
 on:
   push:
     branches: [main]
@@ -9,29 +12,49 @@ on:
 permissions:
   contents: read
 
-# 连续 push 时只保留最后一次部署
 concurrency:
-  group: cloudflare-pages
+  group: cf-deploy-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  WORKER_NAME: gzhu-cats        # Cloudflare 上已存在的 Worker 名，别改
+  COMPAT_DATE: "2026-11-06"     # 与线上当前配置一致
+  SITE_DIR: "."                 # 网站文件所在目录；若在 public/ 里就改成 "public"
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: 拉取代码
+      - name: 拉取仓库
         uses: actions/checkout@v4
 
-      - name: 整理要发布的文件
-        # 只把站点需要的东西挑出来，避免把 .git、README 一起传上去
+      # 把网站文件复制到临时目录（排除 .git/.github），并生成一份临时 wrangler 配置。
+      # 这些都在 runner 的临时目录里完成，不会往仓库里写任何文件。
+      - name: 准备静态文件
         run: |
-          mkdir -p dist
-          cp index.html _headers dist/
-          cp -r assets dist/
-          echo "待发布文件数：$(find dist -type f | wc -l)"
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/site"
+          cp -a "$SITE_DIR"/. "$RUNNER_TEMP/site"/
+          rm -rf "$RUNNER_TEMP/site/.git" "$RUNNER_TEMP/site/.github" "$RUNNER_TEMP/site/.gitignore"
 
-      - name: 部署到 Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=gzhu-cats --branch=main
+          cat > "$RUNNER_TEMP/wrangler.toml" <<CFG
+          name = "$WORKER_NAME"
+          compatibility_date = "$COMPAT_DATE"
+
+          [assets]
+          directory = "./site"
+          not_found_handling = "none"
+          html_handling = "auto-trailing-slash"
+          CFG
+
+          echo "待上传文件数：$(find "$RUNNER_TEMP/site" -type f | wc -l)"
+
+      - name: 部署到 Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          npx --yes wrangler@4 deploy
